@@ -8,6 +8,10 @@ package v20
 
 import (
 	"fmt"
+	"crypto/sha256"
+	//"math"
+	"unsafe"
+	"sort"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric-protos-go/common"
@@ -21,6 +25,7 @@ import (
 	vs "github.com/hyperledger/fabric/core/handlers/validation/api/state"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
+
 )
 
 var logger = flogging.MustGetLogger("vscc")
@@ -196,6 +201,73 @@ func (vscc *Validator) Validate(
 		vscc.stateBasedValidator.PostValidate(namespace, block.Header.Number, uint64(txPosition), err)
 		return policyErr(err)
 	}
+	
+	//
+	//Here our logic
+	//
+
+	//Here we use GetMSPs to get number of orgs in channel	
+	n := 5
+	
+	//We can get this number form transaction (how many certficates in transaction)
+	k := 3
+	
+	
+	//This map create serial number for every MSPid for HashToEndorsers logic
+	var m map[string]int
+	m = make(map[string]int)
+	m["Org1MSP"] = 1
+	m["Org2MSP"] = 2
+	m["Org3MSP"] = 3
+	m["Org4MSP"] = 4
+	m["Org5MSP"] = 5
+	
+	
+	//Here we get MSPids from transaction assuming that k = 3
+	endorsers := make([]int, k)
+	endorsers[0] = m[string(va.endorsements[0].GetEndorser())]
+	endorsers[1] = m[string(va.endorsements[1].GetEndorser())]
+	endorsers[2] = m[string(va.endorsements[2].GetEndorser())]
+	sort.Ints(endorsers)
+
+	h := block.Header.GetDataHash()
+	var h1 *[32]byte
+	h1 = byte32(h)
+	propEndorsers := make([]int, k)
+	
+	//here we make array of MSPids number which have to sign this transaction according to random generation
+	propEndorsers = HashToEndorsers(*h1, n, k)
+	sort.Ints(propEndorsers)
+	
+	
+	//Here we compare array of proposal MSPids and MSPids we get from transaction to make sure that
+	//endorsment of this transaction matches the random generation based on hash of any block among
+	//last t blocks.
+	//In this example, we are doing two iterations of checking the endorsement for randomness.
+	//Below there is an example of logic for depth t where you need to learn how to get hashes of blocks of depth more than two
+	if EqualVectors(propEndorsers, endorsers, k) != true {
+	
+		h = block.Header.GetPreviousHash()
+		
+		h1 = byte32(h)
+		
+		propEndorsers = HashToEndorsers(*h1, n, k)
+		sort.Ints(propEndorsers)
+		
+		if EqualVectors(propEndorsers, endorsers, k) != true {
+		
+			fmt.Errorf("Endorsement policy of this transaction does not generated randomly!!!!")
+			return nil
+		
+		}
+		
+	}
+	
+	fmt.Printf("Endorsement policy of this transaction matches random selection!!!!")
+	
+	//
+	///////
+	//
 
 	txverr := vscc.stateBasedValidator.Validate(
 		namespace,
@@ -220,4 +292,93 @@ func policyErr(err error) *commonerrors.VSCCEndorsementPolicyError {
 	return &commonerrors.VSCCEndorsementPolicyError{
 		Err: err,
 	}
+}
+
+//This function accepts a hash, the total number of organizations and the number of organizations required for the endorsement.
+//As a result, we get a set of non-repeating organizations for endorsement.
+func HashToEndorsers(BlockHash [32]byte, n int, k int) []int {
+	
+	//n - number of orgs
+	//k - number of orgs needed for endorsment
+
+	var m map[uint8]bool
+	m = make(map[uint8]bool)
+	var buf [32]uint8
+	endorsers := make([]int, k)
+	var h [32]byte
+	h = BlockHash
+
+	count := 0
+	i := 0
+	
+	for count < k {
+		
+		i = 0
+		for i <= 31 {
+			if	 count == k {
+				break
+			}
+			buf[i] = uint8(int(h[i]) % n)
+			if m[buf[i]] == false {
+				endorsers[count] = int(buf[i])
+				count = count + 1
+			}
+			i = i + 1
+		}
+		h = sha256.Sum256(h[:])
+	}
+	return endorsers
+}
+
+/*
+
+
+
+//This is the logic that we mentioned above for checking a set of endorsers for randomness
+//when it is possible to descend blocks to a depth of t
+func CheckRandomEndorsers(endorsers []uint8, t int, n int, k int, block *common.Block) (bool, error) {
+
+	//n - number of orgs
+	//k - number of orgs needed for endorsment
+	//t - number of blocks we have to check for randomness in hash
+	
+	//we have to get hash of last blocks
+	//here we just genarate random hash
+	//h := sha256.Sum256([]byte("Not Random text")
+	
+	h := block.Header.GetDataHash()
+	var h1 *[32]byte
+	h1 = byte32(h)
+	buf := make([]uint8, k)
+	i := 0 //counter from 0 to t
+	for i <= t {
+		buf = HashToEndorsers(*h1, n, k)
+		if EqualVectors(buf, endorsers, k) == true {
+			return true, nil
+		}
+		i = i + 1
+		//here we have to go deep into next block
+		//h = sha256.Sum256(h)
+		h = block.Header.GetPreviousHash()
+		h1 = byte32(h)
+	}
+	return false, nil
+} */
+
+func EqualVectors(v1 []int, v2 []int, k int) bool {
+	i := 0
+	for i < k {
+		if v1[i] != v2[i] {
+			return false
+		}
+		i = i + 1
+	}
+	return true
+}
+
+func byte32(s []byte) (a *[32]byte) {
+    if len(a) <= len(s) {
+        a = (*[len(a)]byte)(unsafe.Pointer(&s[0]))
+    }
+    return a
 }
